@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>携程APP机票监控助手 - Flight Tracker</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        
+        <!-- Header -->
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-logo">
+                    <i class="fa-solid fa-mobile-screen-button"></i>
+                </div>
+                <div class="brand-text">
+                    <h1>携程 APP 机票监控助手</h1>
+                    <p>Ctrip Mobile App Flight Tracker</p>
+                </div>
+            </div>
+            <div class="system-status">
+                <span class="status-indicator active"></span>
+                <span class="status-text">手机监控运行中</span>
+            </div>
+        </header>
+
+        <!-- Main Layout Grid -->
+        <main class="dashboard-grid">
+            
+            <!-- Left Side: Form and Settings -->
+            <section class="control-panel">
+                
+                <!-- Quick Add Form -->
+                <div class="panel-card glass">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-plus-circle"></i> 添加监控航线</h2>
+                    </div>
+                    <form id="add-route-form" class="route-form">
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="dep-input">出发城市</label>
+                                <div class="input-wrapper">
+                                    <i class="fa-solid fa-plane-departure input-icon"></i>
+                                    <input type="text" id="dep-input" placeholder="例如: 上海" required>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="arr-input">到达城市</label>
+                                <div class="input-wrapper">
+                                    <i class="fa-solid fa-plane-arrival input-icon"></i>
+                                    <input type="text" id="arr-input" placeholder="例如: 广州" required>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="date-input">出发日期</label>
+                                <div class="input-wrapper">
+                                    <i class="fa-solid fa-calendar-days input-icon"></i>
+                                    <input type="date" id="date-input" required>
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="target-input">目标价格 (元)</label>
+                                <div class="input-wrapper">
+                                    <i class="fa-solid fa-tags input-icon"></i>
+                                    <input type="number" id="target-input" placeholder="低为此价时发送微信通知" min="1">
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="interval-input">监控间隔 (分钟)</label>
+                            <div class="select-wrapper">
+                                <i class="fa-solid fa-clock input-icon"></i>
+                                <select id="interval-input">
+                                    <option value="15">15 分钟</option>
+                                    <option value="30" selected>30 分钟 (推荐)</option>
+                                    <option value="60">1 小时</option>
+                                    <option value="120">2 小时</option>
+                                    <option value="360">6 小时</option>
+                                    <option value="720">12 小时</option>
+                                    <option value="1440">24 小时</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <button type="submit" class="btn btn-primary btn-block">
+                            <i class="fa-solid fa-bell"></i> 开始监控此航线
+                        </button>
+                    </form>
+                </div>
+
+                <!-- WeChat Notification Settings -->
+                <div class="panel-card glass">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-circle-nodes"></i> 微信通知配置</h2>
+                    </div>
+                    <form id="settings-form" class="settings-form">
+                        <div class="form-group">
+                            <label for="wechat-type">通知渠道</label>
+                            <div class="select-wrapper">
+                                <i class="fa-solid fa-comment-sms input-icon"></i>
+                                <select id="wechat-type">
+                                    <option value="none">暂不开启通知</option>
+                                    <option value="serverchan">Server酱 (微信通知)</option>
+                                    <option value="pushdeer">PushDeer (微信/APP通知)</option>
+                                    <option value="bark">Bark (iOS 推送)</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="form-group" id="key-group">
+                            <label for="wechat-key" id="key-label">Key / Token</label>
+                            <div class="input-wrapper">
+                                <i class="fa-solid fa-key input-icon"></i>
+                                <input type="password" id="wechat-key" placeholder="请输入通道对应的推送Key">
+                            </div>
+                            <small class="help-text">在对应官网获取的推送密钥，降价时将以此发送提醒。</small>
+                        </div>
+
+                        <button type="submit" class="btn btn-secondary btn-block">
+                            <i class="fa-solid fa-floppy-disk"></i> 保存配置
+                        </button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Right Side: Monitors Grid -->
+            <section class="main-panel">
+                <div class="section-title-bar">
+                    <h2><i class="fa-solid fa-list-check"></i> 正在监控的航班航线</h2>
+                    <span class="badge" id="route-count">0 条监控中</span>
+                </div>
+                
+                <!-- Active Monitors Container -->
+                <div class="monitors-container" id="monitors-list">
+                    <!-- Loading state -->
+                    <div class="loading-placeholder">
+                        <i class="fa-solid fa-circle-notch fa-spin"></i>
+                        <p>正在加载监控数据...</p>
+                    </div>
+                </div>
+
+                <!-- Log Panel -->
+                <div class="console-panel glass">
+                    <div class="console-header">
+                        <span class="title"><i class="fa-solid fa-terminal"></i> 运行监控日志</span>
+                        <div class="console-actions">
+                            <button id="clear-logs-btn" class="icon-btn" title="清空日志"><i class="fa-solid fa-trash-can"></i></button>
+                            <button id="refresh-logs-btn" class="icon-btn" title="刷新日志"><i class="fa-solid fa-rotate"></i></button>
+                        </div>
+                    </div>
+                    <div class="console-body" id="logs-container">
+                        <!-- Logs populated by JS -->
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Route Detail Modal Overlay -->
+    <div class="modal-overlay" id="route-modal">
+        <div class="modal-content glass">
+            <button class="modal-close-btn" id="close-modal-btn">&times;</button>
+            
+            <div class="modal-header-info">
+                <div class="modal-route-title">
+                    <span id="modal-dep-city">上海</span>
+                    <i class="fa-solid fa-arrow-right-long"></i>
+                    <span id="modal-arr-city">广州</span>
+                </div>
+                <div class="modal-route-meta">
+                    <span class="meta-item"><i class="fa-solid fa-calendar"></i> 出发日期: <strong id="modal-date">2026-06-25</strong></span>
+                    <span class="meta-item"><i class="fa-solid fa-bullseye"></i> 目标价格: <strong id="modal-target-price">¥500</strong></span>
+                </div>
+            </div>
+
+            <div class="modal-tabs">
+                <button class="tab-btn active" data-tab="tab-chart"><i class="fa-solid fa-chart-line"></i> 价格趋势图</button>
+                <button class="tab-btn" data-tab="tab-flights"><i class="fa-solid fa-list-ul"></i> 当前航班列表</button>
+                <button class="tab-btn" data-tab="tab-screenshot"><i class="fa-solid fa-mobile-screen"></i> 手机屏幕实况</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Tab: Chart -->
+                <div class="tab-content active" id="tab-chart">
+                    <div class="chart-container">
+                        <canvas id="priceChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Tab: Flights Table -->
+                <div class="tab-content" id="tab-flights">
+                    <div class="table-responsive">
+                        <table class="flights-table">
+                            <thead>
+                                <tr>
+                                    <th>航空公司</th>
+                                    <th>航班号</th>
+                                    <th>起飞时间</th>
+                                    <th>到达时间</th>
+                                    <th>机票价格</th>
+                                    <th>是否转机</th>
+                                    <th>过境签证</th>
+                                    <th>截图</th>
+                                </tr>
+                            </thead>
+                            <tbody id="flights-table-body">
+                                <!-- Populated dynamically -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Tab: Screenshot -->
+                <div class="tab-content" id="tab-screenshot">
+                    <div class="screenshot-viewer">
+                        <p class="screenshot-info">下方为最近一次手机自动化抓取时的手机屏幕实况截图：</p>
+                        <div class="screenshot-box" style="max-height: 550px; overflow-y: auto;">
+                            <img id="crawler-screenshot" src="/static/screenshot.png" alt="手机实况截图" style="width: auto; height: 500px; object-fit: contain; border-radius: 12px; border: 4px solid #333;" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%25%22 height=%22100%25%22><rect width=%22100%25%22 height=%22100%25%22 fill=%22%23222%22/><text x=%2250%25%22 y=%2250%25%22 font-family=%22sans-serif%22 font-size=%2218%22 fill=%22%23666%22 text-anchor=%22middle%22>暂无实况截图，将在第一次运行爬虫后生成</text></svg>'">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Script Entry -->
+    <script src="/static/app.js"></script>
+</body>
+</html>
