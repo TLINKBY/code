@@ -105,8 +105,24 @@ PY
 - 开启插电常亮。
 - 在关键点击、解析、截图、滑动前检查屏幕是否亮着。
 - 如果屏幕熄灭，会自动点亮并上滑解锁。
+- 如果手机进入 PIN 锁屏页，可以通过环境变量 `ANDROID_UNLOCK_PIN` 自动输入数字 PIN。
 
 仍然建议手机保持 USB 连接或充电，并关闭省电模式。部分 Android 机型在省电模式下会忽略常亮设置。
+
+如果你的手机锁屏需要数字 PIN，可以这样启动：
+
+```bash
+ANDROID_UNLOCK_PIN=123456 ./venv/bin/python main.py
+```
+
+或：
+
+```bash
+export ANDROID_UNLOCK_PIN=123456
+./venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+`ANDROID_UNLOCK_PIN` 只支持 4 到 12 位数字。不要把 PIN 写进代码、README、数据库或 Git 提交。
 
 ## 启动服务
 
@@ -356,6 +372,7 @@ static/screenshot_route_<route_id>.png
 - 手机保持 USB 连接。
 - 关闭省电模式。
 - 确保锁屏不需要复杂密码或人脸识别。
+- 如果必须使用数字 PIN，启动服务时设置 `ANDROID_UNLOCK_PIN`。
 
 ### 5. 连接不上手机
 

@@ -40,31 +40,93 @@ def configure_screen_awake(d):
         except Exception as e:
             add_log("WARNING", f"Failed to run screen-awake command '{cmd}': {e}")
 
-def ensure_screen_on(d):
+def lockscreen_visible(d):
     """
-    关键操作前确认屏幕没有熄灭。若已黑屏，点亮并尝试滑动解锁。
+    粗略判断当前是否停留在系统锁屏/PIN 输入页。
+    不同 Android 版本文案不同，所以只做多 selector 兜底。
+    """
+    selectors = [
+        d(textContains="输入 PIN"),
+        d(textContains="输入密码"),
+        d(textContains="PIN"),
+        d(textContains="密码"),
+        d(textContains="解锁"),
+        d(textContains="紧急"),
+        d(textContains="Emergency"),
+        d(textContains="Enter PIN"),
+        d(descriptionContains="解锁"),
+        d(descriptionContains="Unlock"),
+        d(resourceIdMatches=".*passwordEntry.*"),
+        d(resourceIdMatches=".*pinEntry.*"),
+        d(resourceIdMatches=".*keyguard.*"),
+    ]
+    for sel in selectors:
+        try:
+            if sel.exists(timeout=0.2):
+                return True
+        except Exception:
+            pass
+    return False
+
+def unlock_with_pin_if_needed(d):
+    """
+    如果系统锁屏需要 PIN，使用环境变量 ANDROID_UNLOCK_PIN 解锁。
+    PIN 不写入代码或数据库，避免泄露。
+    """
+    if not lockscreen_visible(d):
+        return
+
+    pin = os.environ.get("ANDROID_UNLOCK_PIN", "").strip()
+    if not pin:
+        add_log("WARNING", "Phone is on lock screen. Set ANDROID_UNLOCK_PIN or unlock manually.")
+        return
+    if not re.fullmatch(r"\d{4,12}", pin):
+        add_log("WARNING", "ANDROID_UNLOCK_PIN must be a 4-12 digit PIN. Unlock manually.")
+        return
+
+    add_log("INFO", "Phone is locked. Entering PIN from ANDROID_UNLOCK_PIN...")
+    try:
+        # 优先用 adb input，避免把 PIN 记录到应用输入框。
+        d.shell(f"input text {pin}")
+        d.shell("input keyevent ENTER")
+        time.sleep(1.5)
+    except Exception as e:
+        add_log("WARNING", f"Failed to enter unlock PIN: {e}")
+
+def wake_and_unlock_device(d):
+    """
+    点亮屏幕并尽量解锁。
+    无密码锁屏：上滑通常即可解锁。
+    PIN 锁屏：需要设置环境变量 ANDROID_UNLOCK_PIN。
     """
     try:
         if not d.info.get('screenOn'):
             add_log("WARNING", "Screen turned off during crawl. Waking it up...")
             d.screen_on()
-            time.sleep(1)
-            d.swipe_ext("up", scale=0.8)
-            time.sleep(1)
+            time.sleep(1.5)
+
+        try:
+            d.unlock()
+        except Exception:
+            pass
+
+        d.swipe_ext("up", scale=0.8)
+        time.sleep(1)
+        unlock_with_pin_if_needed(d)
     except Exception as e:
         add_log("WARNING", f"Failed to verify/wake screen: {e}")
+
+def ensure_screen_on(d):
+    """
+    关键操作前确认屏幕没有熄灭或停在锁屏页。
+    """
+    wake_and_unlock_device(d)
 
 def unlock_device(d):
     """
     点亮屏幕并向上滑动解锁手机
     """
-    if not d.info.get('screenOn'): # 检查屏幕是不是黑屏状态
-        add_log("INFO", "Screen is off. Waking up screen...")
-        d.screen_on() # 点亮屏幕
-        time.sleep(1.5) # 等待屏幕完全亮起
-        
-    d.swipe_ext("up", scale=0.8) # 从底部向上滑动屏幕（模拟手指解锁）
-    time.sleep(1.5) # 等待解锁动画结束
+    wake_and_unlock_device(d)
 
 def dismiss_ads(d):
     """

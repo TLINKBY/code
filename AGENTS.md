@@ -55,7 +55,7 @@
 ## 爬虫实现要点
 
 - `init_device()` 使用 `u2.connect()` 自动连接 USB 或局域网安卓设备。
-- 连接设备后会调用 `configure_screen_awake()`，把熄屏时间设置为 30 分钟，并尝试开启插电常亮；关键点击、解析、截图、滑动前会调用 `ensure_screen_on()`，防止运行中黑屏。
+- 连接设备后会调用 `configure_screen_awake()`，把熄屏时间设置为 30 分钟，并尝试开启插电常亮；关键点击、解析、截图、滑动前会调用 `ensure_screen_on()`，防止运行中黑屏。如果手机进入数字 PIN 锁屏页，可通过环境变量 `ANDROID_UNLOCK_PIN` 自动解锁；不要把 PIN 写进代码或 Git。
 - 操作 App 包名：`ctrip.android.view`。
 - 城市选择优先用 content-desc：`depart city`、`arrival city`，失败后用固定坐标兜底。
 - 日期选择依赖携程日历布局坐标计算：周日为第一列，`HEADER_TO_FIRST_ROW=84`，`ROW_HEIGHT=178`，`GRID_LEFT=13`，`GRID_WIDTH=1054`。
