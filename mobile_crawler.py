@@ -8,20 +8,61 @@ import uiautomator2 as u2 # 导入核心自动化库 uiautomator2，用于操控
 from datetime import datetime # 导入时间日期处理类
 from PIL import Image # 导入图像处理库，用于处理截图
 from db import add_log # 导入我们自己的日志记录函数
+from android_device import choose_device_serial, list_adb_devices, resolve_launcher_activity
+
+BASE_SCREEN_WIDTH = 1080
+BASE_SCREEN_HEIGHT = 2400
+CTRIP_PACKAGE = "ctrip.android.view"
+
 
 def init_device():
     """
     初始化连接安卓设备。
-    它会自动寻找插在 USB 上或者同一 WiFi 局域网下的手机，并在手机端安装必要的服务。
+    默认优先连接正在运行的模拟器；也可用 ANDROID_DEVICE_SERIAL 指定设备。
     """
     try:
-        add_log("INFO", "Connecting to Android device...")
-        d = u2.connect() # 调用 uiautomator2 进行连接
-        add_log("INFO", f"Connected successfully. Device: {d.device_info}") # 打印手机设备信息
+        devices = list_adb_devices()
+        requested_serial = os.environ.get("ANDROID_DEVICE_SERIAL", "").strip() or None
+        serial = choose_device_serial(devices, requested_serial)
+        add_log("INFO", f"Connecting to Android device: {serial}...")
+        d = u2.connect(serial)
+        add_log("INFO", f"Connected successfully ({serial}). Device: {d.device_info}")
         return d
     except Exception as e:
         add_log("ERROR", f"Failed to connect to device. Error: {e}") # 记录连接失败错误
         return None
+
+
+def scaled_point(d, x, y):
+    """把原真机 1080x2400 坐标换算到当前模拟器分辨率。"""
+    try:
+        width, height = d.window_size()
+    except Exception:
+        width = d.info.get("displayWidth", BASE_SCREEN_WIDTH)
+        height = d.info.get("displayHeight", BASE_SCREEN_HEIGHT)
+    return (
+        int(x * width / BASE_SCREEN_WIDTH),
+        int(y * height / BASE_SCREEN_HEIGHT),
+    )
+
+
+def click_scaled(d, x, y):
+    click_x, click_y = scaled_point(d, x, y)
+    d.click(click_x, click_y)
+    return click_x, click_y
+
+
+def start_ctrip_app(d):
+    """冷启动携程，并确认其前台 Activity 已出现。"""
+    activity = resolve_launcher_activity(d, CTRIP_PACKAGE)
+    add_log("DEBUG", f"Starting {CTRIP_PACKAGE}/{activity}")
+    d.app_start(CTRIP_PACKAGE, activity=activity, stop=True, wait=True)
+    time.sleep(1)
+    current = d.app_current()
+    if current.get("package") != CTRIP_PACKAGE:
+        raise RuntimeError(
+            f"Ctrip did not enter foreground. Current app: {current.get('package')}"
+        )
 
 def configure_screen_awake(d):
     """
@@ -105,14 +146,29 @@ def wake_and_unlock_device(d):
             d.screen_on()
             time.sleep(1.5)
 
+        # 不要在屏幕已经解锁时调用 d.unlock() 或无条件上滑。ensure_screen_on()
+        # 会在主页、日历和航班列表中频繁调用；无条件手势会把当前页面一路滑到
+        # 首页广告/内容流。先通过系统状态确认 Keyguard 是否真的显示。
+        keyguard_showing = False
         try:
-            d.unlock()
-        except Exception:
-            pass
+            policy_output = d.shell("dumpsys window policy").output
+            keyguard_showing = bool(re.search(
+                r"(?:showing|mIsShowing)\s*=\s*true",
+                policy_output or "",
+                re.IGNORECASE,
+            ))
+        except Exception as e:
+            add_log("DEBUG", f"Failed to read keyguard state: {e}")
+            keyguard_showing = lockscreen_visible(d)
 
-        d.swipe_ext("up", scale=0.8)
-        time.sleep(1)
-        unlock_with_pin_if_needed(d)
+        if keyguard_showing:
+            add_log("INFO", "Lock screen detected. Unlocking device...")
+            try:
+                d.unlock()
+            except Exception:
+                d.swipe_ext("up", scale=0.8)
+            time.sleep(1)
+            unlock_with_pin_if_needed(d)
     except Exception as e:
         add_log("WARNING", f"Failed to verify/wake screen: {e}")
 
@@ -164,6 +220,13 @@ def dismiss_ads(d):
             sel.click() # 点击右上角或底部的 X 按钮
             time.sleep(1)
 
+    # 首页红包促销浮层的 X 是自绘元素，不出现在 UI hierarchy 中。
+    if d(text="点击收下").exists(timeout=0.5):
+        click_x, click_y = scaled_point(d, 965, 515)
+        add_log("INFO", f"Dismissing coupon popup at ({click_x}, {click_y})...")
+        d.click(click_x, click_y)
+        time.sleep(1)
+
 def select_city(d, desc_selector, city_name):
     """
     负责在携程的主页面点击城市选择框，输入城市名，并在搜索结果里点击这个城市
@@ -172,23 +235,36 @@ def select_city(d, desc_selector, city_name):
     :param city_name: 要输入的城市名字，比如 "成都"
     """
     ensure_screen_on(d)
+
+    # 进入机票页后目的地选择器可能延迟自动弹出。无论它何时出现，都先关闭，
+    # 再从查询页上明确点击本次需要设置的城市字段。
+    if "CityList" in d.app_current().get("activity", ""):
+        add_log("INFO", "Closing unexpected city picker before selecting the requested field...")
+        d.press("back")
+        time.sleep(2)
+
+    if d.app_current().get("package") != CTRIP_PACKAGE:
+        add_log("ERROR", "Ctrip is not in the foreground before city selection; aborting.")
+        return False
+
     selector = d(description=desc_selector) # 寻找出发地/目的地按钮
     if selector.exists(timeout=6):
         add_log("INFO", f"Clicking city selector '{desc_selector}' via description...")
         selector.click() # 点击它，进入城市搜索页面
     else:
-        # 如果 UI 更新导致找不到该描述，使用备用坐标点击（硬编码点击位置）
-        if desc_selector == "depart city":
-            click_x, click_y = 256, 398 # 粗略的出发地中心点坐标
-        else:
-            click_x, click_y = 744, 398 # 粗略的目的地中心点坐标
-        add_log("INFO", f"City selector '{desc_selector}' not found. Clicking coordinate ({click_x}, {click_y})...")
-        d.click(click_x, click_y)
+        # 携程布局变化后，旧坐标可能落在通讯录等其他入口上。找不到明确控件时
+        # 安全终止本次导航，不能在未知页面盲点坐标。
+        add_log("ERROR", f"City selector '{desc_selector}' not found; refusing unsafe coordinate fallback.")
+        return False
         
     time.sleep(2.5) # 给页面滑出动画一点时间
     
     # 验证是否成功进到了城市搜索页面，寻找输入框
-    search_input = d(className="android.widget.EditText")
+    if d.app_current().get("package") != CTRIP_PACKAGE:
+        add_log("ERROR", "Ctrip left the foreground while opening city search; aborting.")
+        return False
+
+    search_input = d(packageName=CTRIP_PACKAGE, className="android.widget.EditText")
     if not search_input.exists():
         search_input = d(resourceId="ctrip.android.view:id/search_input")
         
@@ -201,11 +277,16 @@ def select_city(d, desc_selector, city_name):
         if selector.exists():
             selector.click()
         else:
-            d.click(click_x, click_y)
+            add_log("ERROR", "City selector disappeared during retry; aborting.")
+            return False
         time.sleep(2.5)
         
     # 重新查找输入框
-    search_input = d(className="android.widget.EditText")
+    if d.app_current().get("package") != CTRIP_PACKAGE:
+        add_log("ERROR", "Ctrip left the foreground during city selection; aborting.")
+        return False
+
+    search_input = d(packageName=CTRIP_PACKAGE, className="android.widget.EditText")
     if not search_input.exists():
         search_input = d(resourceId="ctrip.android.view:id/search_input")
         
@@ -260,9 +341,8 @@ def select_date(d, date_str):
         add_log("INFO", "Clicking date selector via description...")
         date_sel.click() # 点击打开日历
     else:
-        # 如果找不到入口，用写死的固定坐标去点
-        add_log("INFO", "Date selector description not found. Clicking coordinate (500, 552)...")
-        d.click(500, 552)
+        add_log("ERROR", "Date selector not found; refusing unsafe coordinate fallback.")
+        return False
     time.sleep(3) # 等待日历加载动画
     
     # 在日历面板里寻找目标月份的标题头 (例如"2026年9月")
@@ -270,6 +350,9 @@ def select_date(d, date_str):
     scroll_count = 0
     # 如果没看到目标月份，就不停往上滑屏幕，最多滑 15 次 (找一年以内的机票)
     while not header_el.exists() and scroll_count < 15:
+        if d.app_current().get("package") != CTRIP_PACKAGE:
+            add_log("ERROR", "Ctrip left the foreground while selecting a date; stopping all swipes.")
+            return False
         ensure_screen_on(d)
         add_log("INFO", "Header not visible. Swiping up to search...")
         d.swipe_ext("up", scale=0.5) # 滑动半个屏幕
@@ -288,9 +371,16 @@ def select_date(d, date_str):
     # - 每一行日期控件的高度是 178 像素
     # - 日历的左右边距：左起 13，总宽 1054（除以 7 等于每列的宽度）
     HEADER_TO_FIRST_ROW = 84  # pixels from header text top to first week row top
-    ROW_HEIGHT = 178 # 每行高度
-    GRID_LEFT = 13 # 左边距
-    GRID_WIDTH = 1054 # 总宽度
+    try:
+        screen_width, screen_height = d.window_size()
+    except Exception:
+        screen_width = d.info.get("displayWidth", BASE_SCREEN_WIDTH)
+        screen_height = d.info.get("displayHeight", BASE_SCREEN_HEIGHT)
+    scale_x = screen_width / BASE_SCREEN_WIDTH
+    scale_y = screen_height / BASE_SCREEN_HEIGHT
+    ROW_HEIGHT = 178 * scale_y # 每行高度
+    GRID_LEFT = 13 * scale_x # 左边距
+    GRID_WIDTH = 1054 * scale_x # 总宽度
     COL_WIDTH = GRID_WIDTH / 7 # 每列宽度（周日到周六）
     
     # 算法：推算我们要找的日子在日历里的第几行、第几列
@@ -311,7 +401,7 @@ def select_date(d, date_str):
     click_x = int(GRID_LEFT + (col_idx + 0.5) * COL_WIDTH)
     
     # 异常处理：如果你要点的日期在这个月的月底（比如31号排在第6行），而现在屏幕下面没显示全（超出了手机屏幕高 2200）
-    if click_y > 2200:
+    if click_y > screen_height - int(200 * scale_y):
         add_log("INFO", f"Target row Y={click_y} is off-screen. Scrolling up...")
         d.swipe_ext("up", scale=0.3) # 稍微往上滑一点点
         time.sleep(1)
@@ -345,39 +435,89 @@ def navigate_to_flights(d, dep, arr, date):
     """
     add_log("INFO", "Opening Ctrip App...")
     # 通过 App 的包名直接冷启动或唤醒携程
-    d.app_start("ctrip.android.view", stop=True)
+    start_ctrip_app(d)
     time.sleep(7) # 给 App 足够的启动时间加载主页
     ensure_screen_on(d)
+
+    # 首次启动的服务协议必须由用户本人确认，自动化不代替用户接受法律条款。
+    if d(text="同意并继续").exists(timeout=2):
+        add_log(
+            "ERROR",
+            "携程首次启动协议尚未确认。请在模拟器中阅读并手动点击“同意并继续”，然后重新触发任务。",
+        )
+        return False
     
     # 尝试关掉一切可能弹出来的广告和提示框
     dismiss_ads(d)
     
-    # Dismiss potential system dialogs (关掉手机系统级别的弹窗，比如“携程请求获取地理位置”)
-    if d(textContains="允许").exists(timeout=1):
-        d(textContains="允许").click()
-        time.sleep(1)
+    # 只处理 Android 权限控制器自己的按钮。不能在所有页面全局匹配
+    # textContains="允许"，否则可能点击携程内容或跳进联系人等外部应用。
+    current_package = d.app_current().get("package", "")
+    if current_package in {
+        "com.android.permissioncontroller",
+        "com.google.android.permissioncontroller",
+    }:
+        permission_buttons = [
+            d(resourceId="com.android.permissioncontroller:id/permission_allow_foreground_only_button"),
+            d(resourceId="com.android.permissioncontroller:id/permission_allow_one_time_button"),
+            d(resourceId="com.android.permissioncontroller:id/permission_allow_button"),
+        ]
+        for permission_button in permission_buttons:
+            if permission_button.exists(timeout=0.5):
+                add_log("INFO", "Granting the visible Android system permission...")
+                permission_button.click()
+                time.sleep(1)
+                break
         
     # Manual Flights Page Automation (Primary path to guarantee date selection)
     add_log("INFO", "Using manual grid automation to guarantee correct date selection...")
+
+    # 冷启动有时会恢复到上次中断的城市选择或日历子页。先退回机票查询页，
+    # 避免把子页里的同名文字当成首页入口再次点击。
+    already_on_flight_search = d(description="inquire main root").exists(timeout=1)
+    for _ in range(3):
+        if already_on_flight_search:
+            break
+        activity = d.app_current().get("activity", "")
+        if "CityList" not in activity and "Calendar" not in activity:
+            break
+        add_log("INFO", f"Recovering from restored Ctrip subpage: {activity}")
+        d.press("back")
+        time.sleep(1.5)
+        already_on_flight_search = d(description="inquire main root").exists(timeout=1)
     
     # 在主页上寻找“机票”入口图标
     flight_icon = d(description="机票")
-    if not flight_icon.exists():
+    if not already_on_flight_search and not flight_icon.exists():
         flight_icon = d(text="机票")
         
-    if flight_icon.exists(timeout=3):
+    if already_on_flight_search or flight_icon.exists(timeout=3):
         ensure_screen_on(d)
-        add_log("INFO", "Clicking '机票' button...")
-        flight_icon.click() # 点击进入机票搜索页
-        time.sleep(4) # 等机票页加载
+        if not already_on_flight_search:
+            add_log("INFO", "Clicking '机票' button...")
+            flight_icon.click() # 点击进入机票搜索页
+            time.sleep(4) # 等机票页加载
+        else:
+            add_log("INFO", "Already on flight search page; skipping duplicate entry click.")
+
+        # 某些版本首次进入机票页会自动弹出目的地选择页。先关闭它，再由下面的
+        # select_city 按既定顺序设置出发地和目的地。
+        if "CityList" in d.app_current().get("activity", ""):
+            add_log("INFO", "Closing automatically opened city picker before route entry...")
+            d.press("back")
+            time.sleep(2)
         
         # 2.0 Ensure '单程' (One Way) is selected to prevent 'Return Date' prompt
         # 确保当前是“单程”模式，否则选了去程日期后，系统会弹个日历逼你选返程日期，打乱我们的流程
         one_way = d(text="单程")
-        if one_way.exists:
-            add_log("INFO", "Selecting '单程' (One Way) mode...")
-            one_way.click()
-            time.sleep(1)
+        if one_way.exists():
+            try:
+                if not one_way.info.get("selected", False):
+                    add_log("INFO", "Selecting '单程' (One Way) mode...")
+                    one_way.click()
+                    time.sleep(1)
+            except Exception as e:
+                add_log("WARNING", f"One-way selector changed during page load; continuing safely: {e}")
         
         # 2a. Input Departure City (输入出发地)
         if not select_city(d, "depart city", dep):
@@ -412,8 +552,9 @@ def navigate_to_flights(d, dep, arr, date):
         
         # 如果所有的规则都找不到那个查询按钮，直接暴力点屏幕最下方的固定坐标
         if not inquire_clicked:
-            add_log("INFO", "Search button not found by selector. Clicking coordinate (540, 1234)...")
-            d.click(540, 1234)
+            click_x, click_y = scaled_point(d, 540, 1234)
+            add_log("INFO", f"Search button not found by selector. Clicking coordinate ({click_x}, {click_y})...")
+            d.click(click_x, click_y)
             
         time.sleep(8)  # 国际航班的查询请求特别慢，留足 8 秒等它出结果
         return True
@@ -719,6 +860,10 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
         success = navigate_to_flights(d, dep_city, arr_city, dep_date)
         if not success:
             add_log("WARNING", "Failed to navigate to flight list results.")
+            # 导航失败时绝不能继续执行下面的固定滑屏循环，否则当前页面如果是
+            # 开屏广告或促销页，爬虫会把广告页当成航班列表持续滑动。
+            d.app_stop(CTRIP_PACKAGE)
+            return []
             
         all_flights = [] # 存放滑动抓取到的所有航班
         seen_keys = set() # 用来给航班去重（因为滑动屏幕时，上下两页会有重复重叠的航班）
@@ -731,6 +876,16 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
             add_log("INFO", f"Scraping screen page {screen + 1}...")
             # 解析当前这一屏上能看见的所有航班
             screen_flights = parse_screen_flights(d, dep_date)
+
+            # 航班列表页至少应该能解析出一条航班。解析结果为空通常意味着
+            # 查询没有成功、页面被弹窗覆盖，或已经误入广告页。此时停止操作，
+            # 避免在未知页面继续盲目滑动。
+            if not screen_flights:
+                add_log(
+                    "WARNING",
+                    f"No flights found on screen page {screen + 1}; stopping to avoid swiping an unexpected page.",
+                )
+                break
             
             new_count = 0
             for f in screen_flights:
@@ -795,18 +950,19 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
                 img.save(screenshot_path)
                 add_log("DEBUG", f"Screenshot saved to {screenshot_path}")
                 
-            # 7. 当前这一屏幕抓完了，手指向上滑动，翻到下一页
-            ensure_screen_on(d)
-            add_log("INFO", "Scrolling down flight list...")
-            d.swipe_ext("up", scale=0.6)
-            time.sleep(2.5) # 给列表滑动滚动留出时间
+            # 7. 当前这一屏幕抓完后再翻到下一页；最后一屏无需继续滑动。
+            if screen < 3:
+                ensure_screen_on(d)
+                add_log("INFO", "Scrolling down flight list...")
+                d.swipe_ext("up", scale=0.6)
+                time.sleep(2.5) # 给列表滑动滚动留出时间
             
         # 8. 抓取结束，按照价格从便宜到贵排个序
         all_flights.sort(key=lambda x: x["price"])
         add_log("INFO", f"Mobile crawling completed. Total unique flights extracted: {len(all_flights)}")
         
         # 9. 任务圆满完成，优雅地杀掉携程 App，把手机恢复桌面状态
-        d.app_stop("ctrip.android.view")
+        d.app_stop(CTRIP_PACKAGE)
         return all_flights
         
     except Exception as e:

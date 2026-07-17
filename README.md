@@ -75,7 +75,32 @@ pip install -r requirements.txt
 ./venv/bin/python main.py
 ```
 
-### 2. 安卓手机准备
+### 2. Android 模拟器准备（推荐）
+
+本项目默认优先连接正在运行的 Android 模拟器。首次配置：
+
+```bash
+./scripts/setup_emulator.sh
+./scripts/start_emulator.sh
+./scripts/install_ctrip.sh
+```
+
+模拟器固定为 1080×2400、420 dpi，与原真机自动化坐标基准一致。以后只需先运行：
+
+```bash
+./scripts/start_emulator.sh
+./venv/bin/python main.py
+```
+
+如果同时启动了多个模拟器，可显式指定：
+
+```bash
+ANDROID_DEVICE_SERIAL=emulator-5554 ./venv/bin/python main.py
+```
+
+首次打开携程时，需要在模拟器中阅读并人工点击“同意并继续”；项目不会代替用户接受法律条款。必要的系统权限弹窗可由现有自动化处理，后续广告、城市、日期与查询流程由项目自动操作。
+
+### 3. 真实安卓手机准备（可选）
 
 本项目依赖真实安卓手机上的携程 App。运行前需要：
 
@@ -97,7 +122,7 @@ PY
 
 如果能输出设备信息，说明连接正常。
 
-### 3. 防止手机熄屏
+### 4. 防止设备熄屏
 
 爬虫连接手机后会尝试执行以下保护：
 
