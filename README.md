@@ -37,13 +37,18 @@
 ├── scheduler.py            # APScheduler 定时任务和手机全局锁
 ├── mobile_crawler.py       # 携程 App 自动化、航班解析、截图
 ├── notifier.py             # ServerChan / PushDeer / Bark 推送
+├── tests/unit/             # 不连接真机的离线回归测试
+├── tools/device/           # 真机调试、UI dump 和冒烟脚本
+├── scripts/                # 模拟器与安装脚本
+├── docs/                   # 设计文档
 ├── static/
 │   ├── index.html          # 网页控制台
 │   ├── app.js              # 前端交互逻辑
-│   └── style.css           # 前端样式
+│   ├── style.css           # 前端样式
+│   └── generated/          # 运行时截图（不入 Git）
 ├── requirements.txt        # Python 依赖
 ├── AGENTS.md               # 给 AI agent 快速恢复上下文的工程备忘
-└── debug_*.py / test_*.py  # UI 自动化调试脚本
+└── .gitignore
 ```
 
 运行时会生成一些本地文件，这些文件不会提交到 Git：
@@ -51,8 +56,7 @@
 ```text
 tracker.db                  # 本地 SQLite 数据库
 server.log                  # 服务日志
-static/screenshot*.png      # 手机截图
-static/target_*.png         # 低价航班截图
+static/generated/*.png      # 手机截图、详情截图和调试截图
 __pycache__/                # Python 缓存
 venv/                       # 虚拟环境
 ```
@@ -345,6 +349,12 @@ GRID_WIDTH = 1054
 ./venv/bin/python -m py_compile main.py db.py scheduler.py mobile_crawler.py notifier.py
 ```
 
+运行离线回归测试：
+
+```bash
+./venv/bin/python -m unittest discover -s tests/unit -t . -v
+```
+
 单独测试爬虫：
 
 ```bash
@@ -381,10 +391,10 @@ curl http://127.0.0.1:8000/api/jobs
 项目会为每条路线保存专属截图：
 
 ```text
-static/screenshot_route_<route_id>.png
+static/generated/screenshot_route_<route_id>.png
 ```
 
-不要只看全局 `static/screenshot.png`，它会被任意路线的最新抓取覆盖。
+不要只看全局 `static/generated/screenshot.png`，它会被任意路线的最新抓取覆盖。
 
 ### 3. 票价被识别成 100
 

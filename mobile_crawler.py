@@ -13,6 +13,9 @@ from android_device import choose_device_serial, list_adb_devices, resolve_launc
 BASE_SCREEN_WIDTH = 1080
 BASE_SCREEN_HEIGHT = 2400
 CTRIP_PACKAGE = "ctrip.android.view"
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+STATIC_DIR = os.path.join(PROJECT_DIR, "static")
+GENERATED_SCREENSHOT_DIR = os.path.join(STATIC_DIR, "generated")
 
 
 def init_device():
@@ -318,6 +321,109 @@ def select_city(d, desc_selector, city_name):
         add_log("ERROR", "Failed to open city search input page.") # 失败了，记录日志
     return False
 
+def choose_calendar_date_view(views, target_date, header_top, screen_width=BASE_SCREEN_WIDTH):
+    """
+    从日历层级中选择目标日号对应的可见节点。
+
+    携程日历的实际行高会随版本、状态栏和滚动位置变化，不能只依赖
+    固定坐标。用固定布局推算值只负责给候选节点排序，最终点击使用节点
+    自己的 bounds 中心。
+    """
+    header_to_first_row = 84
+    row_height = 178 * (screen_width / BASE_SCREEN_WIDTH)
+    grid_left = 13 * (screen_width / BASE_SCREEN_WIDTH)
+    grid_width = 1054 * (screen_width / BASE_SCREEN_WIDTH)
+    col_width = grid_width / 7
+
+    first_day_of_month = datetime(target_date.year, target_date.month, 1)
+    first_col_idx = (first_day_of_month.weekday() + 1) % 7
+    col_idx = (target_date.weekday() + 1) % 7
+    week_idx = (target_date.day - 1 + first_col_idx) // 7
+    expected_x = grid_left + (col_idx + 0.5) * col_width
+    expected_y = header_top + header_to_first_row + week_idx * row_height + row_height / 2
+
+    candidates = []
+    target_day_text = str(target_date.day)
+    for view in views:
+        if view.get("text", "").strip() != target_day_text:
+            continue
+        if view.get("top", 0) < header_top:
+            continue
+        center_x = (view["left"] + view["right"]) / 2
+        center_y = (view["top"] + view["bottom"]) / 2
+        distance = (
+            ((center_x - expected_x) / max(1, col_width)) ** 2
+            + ((center_y - expected_y) / max(1, row_height)) ** 2
+        )
+        candidates.append((distance, view))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def selected_date_matches(d, target_date):
+    """
+    校验搜索页显示的日期；返回 None 表示当前版本没有暴露可识别日期文本。
+    """
+    try:
+        views = collect_screen_views(d)
+    except Exception as e:
+        add_log("DEBUG", f"Failed to inspect selected date: {e}")
+        return None
+
+    date_pattern = re.compile(r"(?<!\d)(\d{1,2})\s*[-/.月]\s*(\d{1,2})(?:日)?")
+    found_dates = []
+    for view in views:
+        match = date_pattern.search(view.get("text", ""))
+        if match:
+            found_dates.append((int(match.group(1)), int(match.group(2))))
+
+    if not found_dates:
+        return None
+    return (target_date.month, target_date.day) in found_dates
+
+
+def calendar_swipe_direction(target_date, visible_months):
+    """
+    根据当前日历可见月份决定搜索方向。
+
+    携程日历向上滑通常进入更晚月份，向下滑回到更早月份。返回 None
+    表示目标月份已经可见；没有可解析月份时沿用向上搜索作为 fallback。
+    """
+    target_key = (target_date.year, target_date.month)
+    month_keys = sorted(set(visible_months))
+    if target_key in month_keys:
+        return None
+    if not month_keys:
+        return "up"
+    if target_key < month_keys[0]:
+        return "down"
+    return "up"
+
+
+def calendar_fallback_click_y(target_date, header_top, today=None, row_height=153, first_row_center_offset=135):
+    """
+    计算自绘日历的坐标 fallback。
+
+    当前携程版本打开当月时会把“今天所在周”置于月份区域首行，
+    而不是把每月 1 号置于首行。月份切换到未来月份后才从第 1 周开始。
+    """
+    today = today or datetime.now()
+    first_day_of_month = datetime(target_date.year, target_date.month, 1)
+    first_col_idx = (first_day_of_month.weekday() + 1) % 7
+    target_week_idx = (target_date.day - 1 + first_col_idx) // 7
+
+    if (target_date.year, target_date.month) == (today.year, today.month):
+        current_week_idx = (today.day - 1 + first_col_idx) // 7
+        visible_week_idx = max(0, target_week_idx - current_week_idx)
+    else:
+        visible_week_idx = target_week_idx
+
+    return int(header_top + first_row_center_offset + visible_week_idx * row_height)
+
+
 def select_date(d, date_str):
     """
     负责在携程自绘的日历控件上，精确点击指定的日期。
@@ -348,14 +454,30 @@ def select_date(d, date_str):
     # 在日历面板里寻找目标月份的标题头 (例如"2026年9月")
     header_el = d(text=target_header_text)
     scroll_count = 0
-    # 如果没看到目标月份，就不停往上滑屏幕，最多滑 15 次 (找一年以内的机票)
+    # 如果没看到目标月份，根据当前可见月份决定向前或向后滑动，最多 15 次
     while not header_el.exists() and scroll_count < 15:
         if d.app_current().get("package") != CTRIP_PACKAGE:
             add_log("ERROR", "Ctrip left the foreground while selecting a date; stopping all swipes.")
             return False
         ensure_screen_on(d)
-        add_log("INFO", "Header not visible. Swiping up to search...")
-        d.swipe_ext("up", scale=0.5) # 滑动半个屏幕
+        visible_months = []
+        try:
+            for view in collect_screen_views(d):
+                match = re.fullmatch(r"(\d{4})年(\d{1,2})月", view.get("text", "").strip())
+                if match:
+                    visible_months.append((int(match.group(1)), int(match.group(2))))
+        except Exception as e:
+            add_log("DEBUG", f"Failed to read visible calendar months: {e}")
+
+        direction = calendar_swipe_direction(target_date, visible_months)
+        if direction is None:
+            break
+        add_log(
+            "INFO",
+            f"Header not visible. Swiping {direction} to search target month "
+            f"(visible: {visible_months or 'unknown'})...",
+        )
+        d.swipe_ext(direction, scale=0.5)
         time.sleep(1) # 等待滑动动画结束
         scroll_count += 1
             
@@ -364,13 +486,8 @@ def select_date(d, date_str):
         return False
     
     # ================== 核心：坐标计算逻辑 ==================
-    # Calendar layout measurements (from UI hierarchy analysis):
-    # 携程日历的排版规律：
-    # - 它是以周日为起点的：日一二三四五六
-    # - 从“2026年X月”这个标题文本的顶部往下数，第 84 个像素，就是第一行日期所在位置
-    # - 每一行日期控件的高度是 178 像素
-    # - 日历的左右边距：左起 13，总宽 1054（除以 7 等于每列的宽度）
-    HEADER_TO_FIRST_ROW = 84  # pixels from header text top to first week row top
+    # 当前携程日历以周日为起点，日期文字行距约为 153 像素。
+    # 左右边距和列宽仍沿用 UI hierarchy 测量值。
     try:
         screen_width, screen_height = d.window_size()
     except Exception:
@@ -378,7 +495,7 @@ def select_date(d, date_str):
         screen_height = d.info.get("displayHeight", BASE_SCREEN_HEIGHT)
     scale_x = screen_width / BASE_SCREEN_WIDTH
     scale_y = screen_height / BASE_SCREEN_HEIGHT
-    ROW_HEIGHT = 178 * scale_y # 每行高度
+    ROW_HEIGHT = 153 * scale_y # 当前自绘日历日期文字行距
     GRID_LEFT = 13 * scale_x # 左边距
     GRID_WIDTH = 1054 * scale_x # 总宽度
     COL_WIDTH = GRID_WIDTH / 7 # 每列宽度（周日到周六）
@@ -387,18 +504,47 @@ def select_date(d, date_str):
     first_day_of_month = datetime(target_date.year, target_date.month, 1) # 拿到这个月第一天
     first_col_idx = (first_day_of_month.weekday() + 1) % 7  # 算出第一天是星期几 (0=周日, 1=周一...星期几就是在第几列)
     col_idx = (target_date.weekday() + 1) % 7 # 算出我们的目标日期在第几列
-    week_idx = (target_date.day - 1 + first_col_idx) // 7 # 算出目标日期在这个月排在第几行（0是第一行）
     
     # 获取标题文本现在在屏幕上的 Y 坐标（这很重要，因为每次滑完它的位置都会变）
     bounds = header_el.info['bounds']
     header_top = bounds['top']
     add_log("INFO", f"Header '{target_header_text}' at Y={header_top}")
     
-    # 计算精确的屏幕点击 Y 坐标：标题顶部Y + 到第一行的距离 + (第几行 * 每行高度) + 半行高度（点在中心）
-    first_row_top = header_top + HEADER_TO_FIRST_ROW
-    click_y = int(first_row_top + week_idx * ROW_HEIGHT + ROW_HEIGHT / 2)
-    # 计算精确的屏幕点击 X 坐标：左边距 + (第几列 + 0.5) * 列宽
+    # 计算固定坐标 fallback：标题顶部Y + 到第一行的距离 + (第几行 * 每行高度) + 半行高度
+    click_y = calendar_fallback_click_y(
+        target_date,
+        header_top,
+        today=datetime.now(),
+        row_height=ROW_HEIGHT,
+        first_row_center_offset=135 * scale_y,
+    )
+    # 计算固定坐标 fallback 的 X：左边距 + (第几列 + 0.5) * 列宽
     click_x = int(GRID_LEFT + (col_idx + 0.5) * COL_WIDTH)
+
+    # 优先使用日历节点实际 bounds，避免固定行高偏移导致点到下一周。
+    date_view = None
+    try:
+        date_view = choose_calendar_date_view(
+            collect_screen_views(d),
+            target_date,
+            header_top,
+            screen_width=screen_width,
+        )
+    except Exception as e:
+        add_log("DEBUG", f"Failed to locate target date node; using coordinate fallback: {e}")
+
+    if date_view:
+        click_x = int((date_view["left"] + date_view["right"]) / 2)
+        click_y = int((date_view["top"] + date_view["bottom"]) / 2)
+        add_log(
+            "INFO",
+            f"Found date node for {date_str}; clicking its bounds center ({click_x}, {click_y}).",
+        )
+    else:
+        add_log(
+            "WARNING",
+            f"Date node for {date_str} is not exposed; using coordinate fallback ({click_x}, {click_y}).",
+        )
     
     # 异常处理：如果你要点的日期在这个月的月底（比如31号排在第6行），而现在屏幕下面没显示全（超出了手机屏幕高 2200）
     if click_y > screen_height - int(200 * scale_y):
@@ -409,8 +555,13 @@ def select_date(d, date_str):
         if header_el.exists():
             bounds = header_el.info['bounds']
             header_top = bounds['top']
-            first_row_top = header_top + HEADER_TO_FIRST_ROW
-            click_y = int(first_row_top + week_idx * ROW_HEIGHT + ROW_HEIGHT / 2)
+            click_y = calendar_fallback_click_y(
+                target_date,
+                header_top,
+                today=datetime.now(),
+                row_height=ROW_HEIGHT,
+                first_row_center_offset=135 * scale_y,
+            )
             add_log("INFO", f"After scroll: header at Y={header_top}, click_y={click_y}")
     
     # 算出坐标后，使用底层的坐标点击功能点下去
@@ -426,6 +577,18 @@ def select_date(d, date_str):
         add_log("WARNING", "Calendar may not have closed. Pressing back...")
         d.press("back")
         time.sleep(2)
+
+    selected_match = selected_date_matches(d, target_date)
+    if selected_match is False:
+        add_log(
+            "ERROR",
+            f"Selected date does not match requested date {date_str}; refusing to continue search.",
+        )
+        return False
+    if selected_match is True:
+        add_log("INFO", f"Verified selected date matches requested date {date_str}.")
+    else:
+        add_log("WARNING", f"Could not verify selected date text for {date_str}; continuing cautiously.")
     
     return True
 
@@ -842,6 +1005,171 @@ def extract_ticket_price(row):
         return None
     return candidates[0]["value"]
 
+def flight_matches(candidate, target):
+    """
+    判断当前屏幕解析到的航班是否是本次查询选出的最低价航班。
+
+    航班号有时由页面解析临时生成，因此同时使用价格和起飞时间约束，
+    避免仅凭价格误点同价的另一趟航班。
+    """
+    return (
+        candidate.get("flight_number") == target.get("flight_number")
+        and candidate.get("price") == target.get("price")
+        and candidate.get("departure_time") == target.get("departure_time")
+    )
+
+def find_and_click_flight(d, target_flight, dep_date, max_upward_swipes):
+    """
+    从抓取结束时的列表位置开始，逐屏向上寻找并点击目标航班。
+    """
+    for attempt in range(max_upward_swipes + 1):
+        ensure_screen_on(d)
+        screen_flights = parse_screen_flights(d, dep_date)
+        matched = next(
+            (flight for flight in screen_flights if flight_matches(flight, target_flight)),
+            None,
+        )
+        if matched:
+            bounds = matched.get("bounds")
+            if not bounds:
+                add_log("WARNING", "Lowest-price flight was found but has no clickable bounds.")
+                return False
+
+            click_x = int((bounds["left"] + bounds["right"]) / 2)
+            click_y = int((bounds["top"] + bounds["bottom"]) / 2)
+            add_log(
+                "INFO",
+                f"Clicking lowest-price flight {target_flight['flight_number']} "
+                f"(¥{target_flight['price']}) at ({click_x}, {click_y})...",
+            )
+            d.click(click_x, click_y)
+            return True
+
+        if attempt < max_upward_swipes:
+            add_log(
+                "DEBUG",
+                f"Lowest-price flight not visible yet; scrolling toward list top "
+                f"({attempt + 1}/{max_upward_swipes})...",
+            )
+            d.swipe_ext("down", scale=0.7)
+            time.sleep(2)
+
+    add_log(
+        "WARNING",
+        f"Could not relocate lowest-price flight {target_flight['flight_number']} "
+        f"(¥{target_flight['price']}); skipping detail screenshot.",
+    )
+    return False
+
+def flight_detail_page_visible(d):
+    """
+    识别用户指定的航班舱位/价格选择页。
+    """
+    views = collect_screen_views(d)
+    texts = [view["text"] for view in views]
+    has_cabin_section = any(
+        any(marker in text for marker in ["经济舱", "公务舱", "头等舱"])
+        for text in texts
+    )
+    has_purchase_action = any(
+        text.strip() == "订" or "选购" in text
+        for text in texts
+    )
+    return has_cabin_section and has_purchase_action
+
+def wait_for_flight_detail_page(d, timeout=15, poll_interval=1):
+    """
+    等待目标页完成加载，避免把加载动画或中间页保存成目标截图。
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ensure_screen_on(d)
+        try:
+            if flight_detail_page_visible(d):
+                return True
+        except Exception as e:
+            add_log("DEBUG", f"Failed to inspect flight detail page while loading: {e}")
+        time.sleep(poll_interval)
+    return False
+
+def save_flight_detail_screenshot(d, flight, screenshot_dir=None):
+    """
+    保存目标详情页全屏截图，并返回可写入数据库的静态资源路径。
+    """
+    if screenshot_dir is None:
+        screenshot_dir = GENERATED_SCREENSHOT_DIR
+    os.makedirs(screenshot_dir, exist_ok=True)
+
+    safe_flight_number = re.sub(r"[^A-Za-z0-9_-]", "_", flight["flight_number"])
+    target_filename = f"target_{safe_flight_number}_{int(time.time())}.png"
+    target_path = os.path.join(screenshot_dir, target_filename)
+    ensure_screen_on(d)
+    d.screenshot().save(target_path)
+    add_log("DEBUG", f"Lowest-price flight detail screenshot saved to {target_path}")
+    return f"/static/generated/{target_filename}"
+
+def return_to_flight_list_after_detail_failure(d):
+    """
+    详情页处理失败后尽量返回航班列表；恢复失败只记日志，不丢弃已抓取结果。
+    """
+    try:
+        d.press("back")
+        time.sleep(2)
+        add_log("INFO", "Returned to flight list after detail screenshot failure.")
+    except Exception as e:
+        add_log("WARNING", f"Failed to return to flight list after detail screenshot failure: {e}")
+
+def capture_lowest_flight_detail(
+    d,
+    flights,
+    dep_date,
+    target_price,
+    max_upward_swipes,
+    screenshot_dir=None,
+):
+    """
+    达标时只进入完整查询结果中的最低价航班，并保存目标页全屏截图。
+    """
+    if not flights or target_price is None:
+        return False
+
+    lowest_flight = min(flights, key=lambda flight: flight["price"])
+    if lowest_flight["price"] > target_price:
+        return False
+
+    add_log(
+        "INFO",
+        f"Lowest price meets target: {lowest_flight['flight_number']} "
+        f"¥{lowest_flight['price']} <= ¥{target_price}. Opening flight detail page...",
+    )
+    if not find_and_click_flight(d, lowest_flight, dep_date, max_upward_swipes):
+        return False
+
+    try:
+        if not wait_for_flight_detail_page(d):
+            add_log(
+                "WARNING",
+                "Flight detail page did not load before timeout; skipping target screenshot.",
+            )
+            return_to_flight_list_after_detail_failure(d)
+            return False
+
+        lowest_flight["screenshot_path"] = save_flight_detail_screenshot(
+            d,
+            lowest_flight,
+            screenshot_dir=screenshot_dir,
+        )
+        add_log(
+            "INFO",
+            f"Captured full-screen detail image for lowest-price flight "
+            f"{lowest_flight['flight_number']}.",
+        )
+        return True
+    except Exception as e:
+        add_log("ERROR", f"Failed to capture lowest-price flight detail screenshot: {e}")
+        return_to_flight_list_after_detail_failure(d)
+        return False
+
 def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_id=None):
     """
     整个手机爬虫的最上层总控函数。它会调用前面写好的所有函数，把整个流程串起来。
@@ -867,6 +1195,7 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
             
         all_flights = [] # 存放滑动抓取到的所有航班
         seen_keys = set() # 用来给航班去重（因为滑动屏幕时，上下两页会有重复重叠的航班）
+        last_screen_index = 0
         
         time.sleep(4) # 等待列表第一页的机票数据完全加载出来
         
@@ -886,6 +1215,7 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
                     f"No flights found on screen page {screen + 1}; stopping to avoid swiping an unexpected page.",
                 )
                 break
+            last_screen_index = screen
             
             new_count = 0
             for f in screen_flights:
@@ -893,39 +1223,6 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
                 key = (f["flight_number"], f["price"])
                 if key not in seen_keys:
                     seen_keys.add(key)
-                    
-                    # 5. 如果我们在执行降价监控，并且当前这个航班跌破了用户的心理底价
-                    if target_price and f["price"] <= target_price:
-                        add_log("INFO", f"Target price met! Capturing screenshot for {f['flight_number']}...")
-                        # 准备截图保存目录
-                        screenshot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-                        os.makedirs(screenshot_dir, exist_ok=True)
-                        target_filename = f"target_{f['flight_number']}_{int(time.time())}.png"
-                        target_path = os.path.join(screenshot_dir, target_filename)
-                        
-                        try:
-                            # 截取一整张全屏图
-                            img = d.screenshot()
-                            bounds = f.get("bounds")
-                            if bounds:
-                                # 把达标的那个航班卡片所在的区域“裁剪”出来（向外扩大20个像素边界）
-                                padding = 20
-                                box = (
-                                    max(0, bounds["left"] - padding),
-                                    max(0, bounds["top"] - padding),
-                                    min(img.width, bounds["right"] + padding),
-                                    min(img.height, bounds["bottom"] + padding)
-                                )
-                                cropped_img = img.crop(box)
-                                cropped_img.save(target_path) # 保存被裁剪的小截图
-                            else:
-                                img.save(target_path) # 如果没算对边界，就老老实实保存全屏图
-                            # 把截图路径写进航班数据里，后面发微信推送就能带上图
-                            f["screenshot_path"] = f"/static/{target_filename}"
-                            add_log("DEBUG", f"Target screenshot saved to {target_path}")
-                        except Exception as e:
-                            add_log("ERROR", f"Failed to save target screenshot: {e}")
-                    
                     all_flights.append(f)
                     new_count += 1
                     
@@ -934,7 +1231,7 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
             # 6. 不管达不达标，只要是第一页，都保存一张全图给网页控制台展示用
             if screen == 0:
                 ensure_screen_on(d)
-                screenshot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+                screenshot_dir = GENERATED_SCREENSHOT_DIR
                 os.makedirs(screenshot_dir, exist_ok=True)
                 route_screenshot_path = None
                 if route_id is not None:
@@ -960,8 +1257,18 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
         # 8. 抓取结束，按照价格从便宜到贵排个序
         all_flights.sort(key=lambda x: x["price"])
         add_log("INFO", f"Mobile crawling completed. Total unique flights extracted: {len(all_flights)}")
+
+        # 9. 完整列表抓取后，只有全局最低价达到目标价时才进入详情页。
+        # last_screen_index 表示当前最多需要向列表顶部恢复多少屏。
+        capture_lowest_flight_detail(
+            d,
+            all_flights,
+            dep_date,
+            target_price,
+            max_upward_swipes=last_screen_index + 1,
+        )
         
-        # 9. 任务圆满完成，优雅地杀掉携程 App，把手机恢复桌面状态
+        # 10. 任务圆满完成，优雅地杀掉携程 App，把手机恢复桌面状态
         d.app_stop(CTRIP_PACKAGE)
         return all_flights
         
@@ -969,7 +1276,7 @@ def scrape_ctrip_mobile(dep_city, arr_city, dep_date, target_price=None, route_i
         # 万一代码抛错崩溃，记录日志并强行截个图留存犯罪现场
         add_log("ERROR", f"Exception in mobile crawl: {e}")
         try:
-            screenshot_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+            screenshot_dir = GENERATED_SCREENSHOT_DIR
             os.makedirs(screenshot_dir, exist_ok=True)
             img = d.screenshot()
             if route_id is not None:

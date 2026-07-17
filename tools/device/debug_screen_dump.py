@@ -14,5 +14,5 @@ for el in d(className="android.widget.TextView"):
     except:
         pass
 
-d.screenshot(filename="static/debug_after_search.png")
-print("\nScreenshot saved to static/debug_after_search.png")
+d.screenshot(filename="static/generated/debug_after_search.png")
+print("\nScreenshot saved to static/generated/debug_after_search.png")

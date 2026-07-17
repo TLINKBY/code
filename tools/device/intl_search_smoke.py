@@ -14,5 +14,5 @@ else:
     d.click(500, 824)
     print("Clicked coordinate 500, 824")
 time.sleep(6)
-d.screenshot(filename="static/intl_search.png")
-print("Saved intl_search.png")
+d.screenshot(filename="static/generated/intl_search.png")
+print("Saved static/generated/intl_search.png")

@@ -127,5 +127,5 @@ for name, sel in candidates:
 
 # Step 9: Take a screenshot of the current search page
 print("\n=== Step 9: Screenshot ===")
-d.screenshot(filename="static/debug_search_page.png")
-print("Saved debug_search_page.png")
+d.screenshot(filename="static/generated/debug_search_page.png")
+print("Saved static/generated/debug_search_page.png")

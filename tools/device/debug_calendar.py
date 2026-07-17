@@ -89,5 +89,5 @@ else:
             print(f"Found after swipe at Y={h_bounds.get('top')}-{h_bounds.get('bottom')}")
             break
 
-d.screenshot(filename="static/debug_calendar.png")
+d.screenshot(filename="static/generated/debug_calendar.png")
 print("\nScreenshot saved")

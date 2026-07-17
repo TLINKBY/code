@@ -35,7 +35,8 @@ flowchart TD
     G -->|否| E
     G -->|是| H["按设计文档写代码"]
     H --> I["补测试或验证脚本"]
-    I --> J["报告结果和风险"]
+    I --> J["使用已连接真机确认修改结果"]
+    J --> K["报告结果和风险"]
 ```
 
 ### 必须问清楚什么
@@ -117,6 +118,9 @@ flowchart TD
 
 ## 测试规约
 
+- 每完成一个修改需求，无论风险等级或是否直接涉及手机自动化，Agent 都必须亲自使用已连接的真实设备确认修改结果后，才能宣称该需求完成。真机确认应覆盖本次修改对应的用户可见行为或实际运行路径，不能只确认设备已连接、应用能启动或服务能响应。
+- 真机确认必须记录验证对象、操作路径和实际结果，并在最终回复中明确写出 PASS 或 FAIL。若修改不直接作用于手机端，应仍通过真机访问对应页面、触发相关任务或观察最终运行结果，确认完整链路符合预期。
+- 如果设备、网络、账号、权限或运行环境导致真机确认无法执行，必须明确报告阻塞和已经完成的离线验证，不得宣称需求已完成，也不得把真机确认步骤仅留给用户。
 - 每完成一个用户追加的新功能，都必须同步新增或更新一个可运行的测试、验证脚本或明确的验证命令。
 - 测试应尽量覆盖该功能的核心成功路径和关键边界条件；如果涉及手机 UI 自动化且无法稳定自动测，至少补离线单元测试或可重复执行的最小验证脚本。
 - 涉及手机 UI 自动化、手机导航、锁屏/熄屏、日期坐标或真机页面解析的实现，代码写完并通过离线测试后，Agent 必须亲自使用已连接的真实设备完成验证并记录结果，不得只把“人工验证步骤”留给用户；如果设备、网络或权限不可用，必须明确报告阻塞，不能宣称任务已完成。
@@ -130,9 +134,9 @@ flowchart TD
 
 | 风险 | 示例 | 最低验证 |
 |---|---|---|
-| 低 | 文档、日志文案、孤立前端样式、不影响行为的小清理 | `git diff --check`；如涉及 Python 文件，运行 `py_compile` |
-| 中 | 前端 API 调用、数据库读写逻辑、通知逻辑、价格解析 helper、调度器参数 | 聚焦测试脚本 + `./venv/bin/python -m py_compile main.py db.py scheduler.py mobile_crawler.py notifier.py` |
-| 高 | 手机导航流程、锁屏/熄屏策略、日期坐标、航班价格解析主流程、数据库 schema、任务并发/锁 | 离线回归测试 + 语法检查 + 真实设备人工验证步骤；必要时先暂停活跃任务或在单条路线验证 |
+| 低 | 文档、日志文案、孤立前端样式、不影响行为的小清理 | `git diff --check`；如涉及 Python 文件，运行 `py_compile`；真机确认对应结果 |
+| 中 | 前端 API 调用、数据库读写逻辑、通知逻辑、价格解析 helper、调度器参数 | 聚焦测试脚本 + `./venv/bin/python -m py_compile main.py db.py scheduler.py mobile_crawler.py notifier.py` + 真机完整链路确认 |
+| 高 | 手机导航流程、锁屏/熄屏策略、日期坐标、航班价格解析主流程、数据库 schema、任务并发/锁 | 离线回归测试 + 语法检查 + 真实设备确认；必要时先暂停活跃任务或在单条路线验证 |
 
 ### 验证矩阵
 
@@ -223,7 +227,7 @@ flowchart TD
 3. `scheduler.add_route_job()` 注册定时任务，并 `trigger_route_now_async()` 立即后台抓取一次。
 4. `run_crawl_job()` 读取路线，拿 `device_lock`，调用 `scrape_ctrip_mobile()`。
 5. 爬虫返回航班列表后，`add_price_log()` 写入 `prices`。
-6. 如果最低价低于 `target_price`，调用 `send_wechat_notification()` 推送，并保存达标航班截图到 `static/target_*.png`。
+6. 如果最低价低于 `target_price`，调用 `send_wechat_notification()` 推送，并保存达标航班详情截图到 `static/generated/target_*.png`。
 7. 前端轮询 `/api/routes`、`/api/logs`、`/api/routes/{id}/history` 展示状态、日志、趋势和航班表。
 
 ## API 速查
@@ -251,11 +255,11 @@ flowchart TD
 - 连接设备后会调用 `configure_screen_sleep_policy()`，把熄屏时间设置为 1 分钟，并关闭插电常亮/stay-awake；每次爬取开始会唤醒手机，数字 PIN 锁屏默认输入 `0000`，可用 `ANDROID_UNLOCK_PIN` 覆盖；关键点击、解析、截图、滑动前会调用 `ensure_screen_on()`，防止运行中黑屏；爬取结束或异常退出后会调用 `sleep_device_when_idle()` 关闭携程并熄屏。不要把真实 PIN 写进代码或 Git。
 - 操作 App 包名：`ctrip.android.view`。
 - 城市选择优先用 content-desc：`depart city`、`arrival city`，失败后用固定坐标兜底。
-- 日期选择依赖携程日历布局坐标计算：周日为第一列，`HEADER_TO_FIRST_ROW=84`，`ROW_HEIGHT=178`，`GRID_LEFT=13`，`GRID_WIDTH=1054`。
+- 日期选择支持双向月份滑动；优先点击可访问日期节点，否则按当前月“今天所在周”与未来月份首周计算 fallback 坐标，并在点击后校验日期文本。
 - 查询按钮不要用 `textContains="查询"`，因为会误点“最近查询”。现有代码使用 `description="do inquire"`、精确文本和坐标兜底。
 - 航班解析来自一次性 `dump_hierarchy()` 得到的可访问控件文字，不只扫 `android.widget.TextView`，因为携程主票价可能用其他控件暴露。不要用 `for el in d()` 逐个遍历控件，复杂页面会卡住并占用设备锁。解析时按 Y 坐标聚类，过滤广告横幅和底部排序栏，再用正则提取价格、时间、航班号、中转/过境签信息。价格不要取同一行最小数字；携程会显示“已优惠 ¥100”这类优惠金额，应优先取右侧主票价。
 - 每次抓取滑动 4 屏，按 `(flight_number, price)` 去重，最后按价格升序返回。
-- 第一屏会保存路线专属截图 `static/screenshot_route_<route_id>.png`，并保留旧的全局调试截图 `static/screenshot.png`；达标价格会裁剪航班卡片保存为 `static/target_*.png`。
+- 第一屏会保存路线专属截图 `static/generated/screenshot_route_<route_id>.png`，并保留全局调试截图 `static/generated/screenshot.png`；达标价格会进入最低价航班详情页并保存全屏图到 `static/generated/target_*.png`。
 
 ## 易碎点和注意事项
 
@@ -264,20 +268,20 @@ flowchart TD
 - 所有手机操作必须继续走 `device_lock`，否则并发任务会互相干扰。
 - `db.py` 的 `init_db()` 导入即执行；写测试或脚本时会触碰真实 `tracker.db`。
 - `tracker.db` 是真实运行数据，已有路线、价格和大量日志；不要随意删除或重建。
-- `static/` 中有运行截图和调试截图，可能会被爬虫覆盖，尤其是 `static/screenshot.png`。
+- `static/generated/` 中有运行截图和调试截图，可能会被爬虫覆盖，尤其是 `static/generated/screenshot.png`。
 - 前端依赖外部 CDN：Google Fonts、FontAwesome、Chart.js。离线环境下图标/图表可能无法加载。
 
 ## 调试脚本
 
-根目录有多个一次性调试脚本，主要用于观察携程 UI 或验证自动化流程：
+`tools/device/` 下有多个一次性调试脚本，主要用于观察携程 UI 或验证自动化流程：
 
-- `debug_full_flow.py`、`debug_city_flow.py`、`debug_click_date.py`：流程/城市/日期选择调试。
-- `debug_calendar.py`、`debug_calendar_hierarchy.py`、`calendar.xml`、`calendar_hierarchy.xml`：日历布局分析。
-- `dump_current_screen.py`、`dump_inquire.py`、`dump_intl.py`、`debug_screen_dump.py`：屏幕和控件 dump。
-- `test_intl_search.py`、`test_one_way.py`、`test_back_to_search.py`：携程页面入口和单程/查询测试。
-- `test_aps.py`：APScheduler 基础测试。
+- `tools/device/debug_full_flow.py`、`debug_city_flow.py`、`debug_click_date.py`：流程/城市/日期选择调试。
+- `tools/device/debug_calendar.py`、`debug_calendar_hierarchy.py`：日历布局分析。
+- `tools/device/dump_current_screen.py`、`dump_inquire.py`、`dump_intl.py`、`debug_screen_dump.py`：屏幕和控件 dump。
+- `tools/device/intl_search_smoke.py`、`one_way_smoke.py`、`back_to_search_dump.py`：携程页面入口和单程/查询测试。
+- `tools/device/scheduler_smoke.py`：APScheduler 基础测试。
 
-这些脚本多数会直接连接手机并启动携程 App，运行前确认设备可用。
+这些脚本多数会直接连接手机并启动携程 App，运行前确认设备可用；离线回归测试位于 `tests/unit/`，可用 `python -m unittest discover -s tests/unit -t .` 运行。
 
 ## 修改建议
 

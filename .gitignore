@@ -26,6 +26,7 @@ tracker.db
 
 # Generated crawler screenshots and UI dumps
 static/*.png
+static/generated/*.png
 *.png
 calendar.xml
 calendar_hierarchy.xml

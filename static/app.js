@@ -575,7 +575,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function routeScreenshotSrc(routeId) {
-        return `/static/screenshot_route_${routeId}.png?t=${new Date().getTime()}`;
+        return `/static/generated/screenshot_route_${routeId}.png?t=${new Date().getTime()}`;
     }
 
     // ----------------------------------------------------
